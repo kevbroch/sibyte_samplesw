@@ -1,0 +1,69 @@
+$Id: unhandler_netbsd.patch,v 1.1 2004/03/20 07:04:48 cgd Exp $
+
+This patch applies to NetBSD sources are of 2004-03-20 00:00 UTC,
+and with it applied NetBSD userland processes will have unaligned
+accesses fixed up automatically.
+
+In addition to applying this patch, you need to copy (or symlink)
+unhandler.c and unhandler_netbsd.h from this directory, to the
+files sys/arch/mips/mips/unhandler.c and
+sys/arch/mips/mips/unhandler.h, respectively.
+
+Index: sys/arch/mips/conf/files.mips
+===================================================================
+RCS file: /cvsroot/src/sys/arch/mips/conf/files.mips,v
+retrieving revision 1.50
+diff -u -p -r1.50 files.mips
+--- sys/arch/mips/conf/files.mips	4 Mar 2004 20:17:01 -0000	1.50
++++ sys/arch/mips/conf/files.mips	20 Mar 2004 07:00:29 -0000
+@@ -30,6 +30,7 @@ file	arch/mips/mips/kgdb_machdep.c		kgdb
+ file	arch/mips/mips/mem.c
+ file	arch/mips/mips/pmap.c
+ file	arch/mips/mips/trap.c			# trap handlers
++file	arch/mips/mips/unhandler.c
+ file	arch/mips/mips/syscall.c		# syscall entries
+ file	arch/mips/mips/mips_machdep.c
+ file	arch/mips/mips/sig_machdep.c		# signal delivery
+Index: sys/arch/mips/mips/trap.c
+===================================================================
+RCS file: /cvsroot/src/sys/arch/mips/mips/trap.c,v
+retrieving revision 1.192
+diff -u -p -r1.192 trap.c
+--- sys/arch/mips/mips/trap.c	14 Mar 2004 01:08:48 -0000	1.192
++++ sys/arch/mips/mips/trap.c	20 Mar 2004 07:00:29 -0000
+@@ -125,6 +125,8 @@ __KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.1
+ #include <sys/kgdb.h>
+ #endif
+ 
++#include "unhandler.h"
++
+ int want_resched;
+ 
+ const char *trap_type[] = {
+@@ -455,9 +457,26 @@ trap(unsigned status, unsigned cause, un
+ 		return; /* KERN */
+ 
+ 	case T_ADDR_ERR_LD+T_USER:	/* misaligned or kseg access */
++		if ((l->l_md.md_flags & MDP_FPUSED) && l == fpcurlwp)
++			savefpregs(l);
++		if (unaligned_load_handler (l,
++		    (struct frame *)l->l_md.md_regs, cause))
++			goto normal_ADEx;
++		userret(l);
++		return; /* GEN */
++		
+ 	case T_ADDR_ERR_ST+T_USER:	/* misaligned or kseg access */
++		if ((l->l_md.md_flags & MDP_FPUSED) && l == fpcurlwp)
++			savefpregs(l);
++		if (unaligned_store_handler (l,
++		    (struct frame *)l->l_md.md_regs, cause))
++			goto normal_ADEx;
++		userret(l);
++		return; /* GEN */
++		
+ 	case T_BUS_ERR_IFETCH+T_USER:	/* BERR asserted to CPU */
+ 	case T_BUS_ERR_LD_ST+T_USER:	/* BERR asserted to CPU */
++ normal_ADEx:
+ 		ksi.ksi_trap = type & ~T_USER;
+ 		ksi.ksi_signo = SIGSEGV; /* XXX */
+ 		ksi.ksi_addr = (void *)vaddr;

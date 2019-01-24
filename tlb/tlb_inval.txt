@@ -1,0 +1,514 @@
+Avoiding TLB Shutdown on MIPS32 and MIPS64 CPUs
+
+Chris Demetriou, Broadcom Corporation
+
+
+* Introduction
+
+The MIPS32 and MIPS64 Privileged Resource Architecture (PRA) documents[3][4]
+standardize the kernel-mode architecture used for MIPS32 and MIPS64
+CPUs, including the operations used for TLB (Translation Lookaside
+Buffer) manipulations.  For the most part they standardize existing
+TLB manipulation primitives and practices which date back to the MIPS
+R4000 CPU.  An important exception is that they introduce the notion
+of "TLB Shutdown," which may occur if the TLB is programmed
+improperly.
+
+This application note provides background information on MIPS Virtual
+address maps and TLBs, describes TLB Shutdown, and motivates the use
+of carefully-coded algorithms for TLB invalidation and cleaning which
+avoid TLB Shutdown.  Algorithms for safe TLB invalidation and cleaning
+are provided in pseudo-code which can be easily translated to assembly
+language or to C (with inline assembly for certain operations).
+
+
+* MIPS32 and MIPS64 Virtual Address Maps
+
+MIPS CPU virtual address address space is split into several segments,
+or regions of virtual address space.  These segments are described
+below.
+
+There are two basic types of segments: mapped segments, and unmapped
+segments (called "direct-mapped" by some).  In mapped segments,
+translation from virtual addresses to physical addresses is done using
+the TLB.  Unmapped segments, on the other hand, have a fixed
+translation from virtual address to corresponding physical address.
+
+In the MIPS architecture, memory protection (e.g., keeping user-mode
+programs from accessing kernel-mode data) is implemented by means of
+these segments.  The different segments allow access from different
+modes, and some are restricted to only supervisor or kernel modes.
+Segments have a minimum privilege mode required for access, and
+operating modes with greater privilege can also access those segments.
+
+Cacheability, specifically the Cache Coherency Attribute (CCA), used
+to access data in a given segment depends on the type of segment.  For
+mapped segments, the CCA is taken from the TLB entry which maps the
+virtual address.  For unmapped segments, the CCA is specified by the
+architecture (and, in one case, settable via a register).
+
+The virtual address space segments supported by MIPS32 CPUs are: [3]
+
+    name    minimum mode	address		translation type
+	    to access		range
+
+    useg    user mode		0x00000000 -	Mapped by TLB
+				0x7fffffff
+
+    kseg0   kernel mode		0x80000000 -	Unmapped,
+				0x9fffffff	PA = VA & 0x3fffffff
+						CCA = CP0 Config.K0
+
+    kseg1   kernel mode		0xa0000000 -	Unmapped
+				0xbfffffff	PA = VA & 0x3fffffff
+						CCA = 2 (Uncached)
+
+    sseg    supervisor mode(*)  0xc0000000 -	Mapped by TLB
+				0xdfffffff
+
+    kseg3   kernel mode		0xe0000000 -	Mapped by TLB
+				0xffffffff
+
+(*) If supervisor mode is not implemented, "sseg" can (and often is)
+used by kernel-mode programs.  In that case, it is a mapped segment
+which requires kernel mode for access.  In the R4000, before
+supervisor mode was created, sseg and kseg3 were collectively known as
+"kseg2."
+
+The MIPS64 architecture provides a superset of the segments provided
+by the MIPS32 architecture.[4]  The segments mentioned above are
+provided as 32-bit compatibility segments, with their virtual
+addresses "sign extended" to 64-bits.  Thus, in MIPS64, "useg" remains
+at virtual addresses 0x0000000000000000 - 0x000000007fffffff, but
+kseg0 resides at addresses 0xffffffff80000000 - 0xffffffff9fffffff.
+
+In addition to these 32-bit compatibility segments, the MIPS64
+architecture provides a set of "extended" segments which allow access
+to larger mapped address spaces (via the "xuseg," "xkseg," and "xsseg"
+segments), and complete access to the physical physical address space
+with any CCA, using the sub-segments of the unmapped "xkphys"
+segment.  See the MIPS64 Privileged Resource Architecture
+specification for more information about these segments.
+
+
+* MIPS TLB Structure
+
+MIPS CPUs implement an architecturally visible TLB which must be
+manipulated directly by the operating system in order to create and
+destroy virtual to physical address translations for the mapped
+virtual address space segments.
+
+The TLB is organized as a fully associative array of between 1 and 64
+entries (in the current version of the MIPS32 and MIPS64 PRA
+documents).  Each TLB entry can map virtual addresses in a given
+virtual page to two different physical pages.  The physical page size
+is settable on a per-entry basis, and is a minimum of 4kB, so each TLB
+entry maps a minimum of 8KB of virtual address space on an aligned
+boundary.  Accesses to the lower half of the addresses mapped mapped
+by the TLB entry go to the first physical page, accesses to the higher
+half of the addresses go to the second physical page.
+
+The MIPS32 and MIPS64 architectures allow CPUs to implement, at their
+option, additional power-of-four multiples of 4kB up to and including
+256MB.  For instance, if a given TLB entry is programmed to use 16kB
+physical pages, the TLB entry will map 32kB of virtual space (which
+must start on a 32kB boundary) to two independent 16kB physical pages
+(each of which must start on a 16kB boundary).
+
+In addition to the virtual address to be mapped by the entry, each TLB
+entry is tagged with an Address Space Identifier (ASID), which is used
+to avoid the need to invalidate TLB entries on process context switches.
+TLB entries for multiple ASIDs may exist in the TLB, but when a TLB
+lookup is done to map a virtual address to a physical address, entries
+which do not match the current ASID are ignored.
+
+Each half of a TLB entry, corresponding to one of the physical pages
+being mapped, has several independent fields.  A "valid" bit can
+disable translations through that half of the entry, a "dirty" bit
+controls whether or not write accesses are permitted through that half
+of the entry, and a Cache Coherency Attribute is provided which is
+used when accesses are made through that half of the TLB entry.  In
+addition, each half of a TLB entry also has a "global" bit.  If both
+halves have their global bits set, that means that the mapping is
+visible in all address spaces (i.e., the ASID is ignored when
+performing the TLB lookup).
+
+A non-intuitive but very important aspect of the MIPS TLB structure is
+that even when both halves of a TLB entry are marked invalid (i.e.,
+their "valid" bits are cleared), the entry itself is still valid.
+That is, if you place an entry into the TLB, mapping a virtual region
+but with both valid bits clear, then probe the TLB for an entry
+corresponding to that region, the TLB will report that it has a
+matching entry.  This understanding is key when implementing code
+that manipulates the MIPS TLB properly.
+
+
+* Operations on MIPS TLBs
+
+MIPS TLBs are manipulated by use of several privileged instructions
+and by accessing system control coprocessor (Coprocessor 0; CP0)
+registers.  This section briefly describes how software manipulates
+the TLB, and describes the instructions and registers used during TLB
+manipulation.  For more a more complete description, including
+register numbers and bit definitions, see the MIPS32 and MIPS64
+Privileged Resource Architecture specifications.
+
+The operating systems running on a MIPS CPU is responsible for
+controlling the contents of the CPU's TLB.  Typically, there are some
+number of entries which are "wired" to statically translate certain
+virtual addresses, at operating system startup time.  The remainder
+are updated dynamically in response to TLB miss exceptions.  When a
+TLB entry needs to be created in response to a TLB miss, typically
+another entry, picked at random, is replaced with the new entry.
+
+The CP0 Registers related to TLB manipulation are: [3][4]
+
+    Configuration Register 1 (Config1): Specifies the number of TLB
+    entries that the CPU supports.  Throughout this document the
+    number of TLB entries supported by the CPU is referred to as
+    Num_TLB_Entries.
+
+    Wired: Contains the number of 'wired' TLB entries, which are
+    exempt from random replacement.
+
+    Random: Contains a random or pseudo-random number, used as the
+    index to write when writing a random TLB entry.  Will not select
+    entries with indices 0..<Wired>.  The value of the register
+    changes dynamically, typically from one instruction to the next.
+
+    Index: Contains the index used to read or write the TLB for
+    index-based read and write operations, or the index of a matching
+    TLB entry for TLB probes (as well as an indication of whether the
+    probe was successful).
+
+    EntryHi: Contains the virtual address information and ASID for a
+    TLB Entry.
+
+    EntryLo0 and EntryLo1: Each contain the physical page to be used
+    to map that half of a TLB entry, along with other information as
+    described in the previous section (including independent "valid"
+    and "global" bits).
+
+    PageMask: Contains a bit pattern which describes the physical (and
+    therefore virtual) page size for a given TLB entry.
+
+The instructions related to TLB manipulation are: [2][3]
+
+    mfc0, mtc0, dmfc0, dmtc0: Used to read and write the CP0 registers
+    described above.
+
+    tlbr: Reads the TLB entry with the index given in the Index
+    register, putting the TLB entry's information into the EntryHi,
+    EntryLo0, EntryLo1, and PageMask registers.
+
+    tlbwi: Writes the TLB entry information in the EntryHi, EntryLo0,
+    EntryLo1, and PageMask registers into the TLB entry specified by
+    the Index register.
+
+    tlbwr: Like "tlbwi," but writes into the TLB entry specified by
+    the current value of the Random register.
+
+    tlbp: Searches the TLB for an entry that matches the current
+    virtual address and ASID in the EntryHi register, and places the
+    index of that entry and an indication of success or failure in the
+    Index register.
+
+With that basic understanding, the problem of TLB invalidation and TLB
+Shutdown can be explored.
+
+
+* MIPS TLB Invalidation and TLB Shutdown
+
+Recall that the TLB on MIPS considers TLB entries valid even if their
+pages' "valid" bits are clear.  That means that a TLB entry, even if
+invalid, can match a virtual address.  The exception generated by that
+condition is different than if no entry is found in the TLB at all for
+that address.  In general, when invalidating the TLB on MIPS CPUs, the
+desire is to put the entries into a state where they will not match
+virtual addresses, so that any subsequent accesses will to through the
+(often fast-pathed) "TLB miss" exception handler rather than the
+slower "TLB invalid" handler.
+
+In order to do this, each TLB entry being invalidated is set to "map"
+a page in one of the unmapped virtual memory segments.  Since the TLB
+will never be consulted for such accesses, they can never match a
+virtual address, and therefore will not cause a "TLB invalid"
+exception.
+
+Historically, operating systems have implemented invalidation of the
+TLB using a mechanism like the following pseudo-code:
+
+    EntryHi = 0x80000000;      /* 0xffffffff80000000 if MIPS64 */
+    EntryLo0 = EntryLo1 = 0;   /* Invalid, not global. */
+    PageMask = 0;	       /* 4kB physical page size. */
+    for (i = Wired; i < Num_TLB_Entries; i++) {
+	Index = i;
+	tlbwi;
+    }
+
+This has the effect of writing each (not-wired) TLB entry to cover an
+unmapped address.  In fact, each will cover the same unmapped address.
+(In fact, to date, no less than 5 operating systems which have
+historically run on MIPS have been found to use an algorithm like the
+one above to invalidate the TLB.)
+
+Unfortunately, this runs afoul of the "TLB Shutdown" a new error
+condition introduced with the MIPS32 and MIPS64 architectures.
+
+TLB Shutdown allows the CPU optionally to detect the condition where
+multiple TLB entries will match a given virtual address (in effect,
+where multiple TLB entries virtual address ranges overlap).  This
+detection can occur either at the time of the TLB write (tlbwi, tlbwr)
+of an overlapping entry, or at the time when virtual address
+translations are performed by the TLB.  (Because detection at TLB
+write time is the worst case for software portable between different
+implementations of the MIPS32 and MIPS64 architectures, that is
+assumed to be the point of detection throughout the rest of this
+document.)  Obviously, since the algorithm above causes each TLB entry
+to map the same virtual address, it causes overlapping TLB entries.
+
+When overlapping entries are detected, the CPU takes a TLB Shutdown
+exception, as described in the MIPS32 and MIPS64 Privileged Resource
+Architecture documents.  Allowing CPU designers to signal an error
+when duplicate matching TLB entries are created or found can allow
+them to implement more efficient TLB designs in an electrically safe
+manner.  Several MIPS32 and MIPS64 CPUs, including Broadcom's SB-1 CPU
+core (used in SiByte SOCs), do detect duplicate matching entries and
+signal TLB Shutdown.
+
+Unfortunately, it is hard to recover cleanly from TLB Shutdown.  Since
+the time of detection of the problem is implementation-specific, and
+the state of the TLB when the TLB Shutdown is signaled is
+implementation-specific, implementation-specific code would be
+required to gracefully recover.  Because of this, it is best to
+attempt to avoid the TLB shutdown condition in the first place and
+treat it as a fatal error (indicating an operating system or firmware
+defect) if it occurs.
+
+
+* Avoiding TLB Shutdown
+
+To avoid TLB Shutdown, an algorithm which avoids placing multiple
+overlapping entries in the TLB should be used.  This is done by using
+a unique virtual address range for each TLB entry, so that none
+overlap.
+
+An algorithm like the following can be used to invalidate all
+non-wired TLB entries:
+
+    base = 0x80000000;         /* 0xffffffff80000000 if MIPS64 */
+    EntryLo0 = EntryLo1 = 0;   /* Invalid, not global. */
+    PageMask = 0;	       /* 4kB physical page size. */
+    for (i = Wired; i < Num_TLB_Entries; i++) {
+	Index = i;
+	EntryHi = base + (i * 2 * phys_page_size);
+	tlbwi;
+    }
+
+(If invalidating all TLB entries, this can be optimized to avoid the
+multiplication.)
+
+This algorithm assigns each TLB entry a unique virtual page, and,
+since that assignment is done based on the TLB entry's index, no two
+of the entries invalidated by this routine will overlap.
+
+(The MIPS programming guide _See MIPS Run_ provides a similar
+algorithm, but does not explain that it should be written that way to
+avoid TLB shutdown.[5]  That's an important omission, since historically
+operating systems which run on MIPS processors have used the algorithm
+presented earlier which is not safe from TLB Shutdown.)
+
+This algorithm works well as long as all code running on the system
+uses an identical mechanism to invalidate the TLB.
+
+
+* The Need for TLB Flushing at Transfer of Machine Control
+
+Unfortunately, on many systems, firmware and operating system software
+are independent, often developed and maintained by separate individuals
+or organizations.  It can happen (and has, in fact happened) that
+firmware and and operating system software might pick "incompatible"
+TLB invalidation sequences which, despite being safe independently,
+together cause TLB Shutdown.
+
+For instance, assume that the firmware uses the sequence above to
+invalidate the TLB, and that the operating system uses an algorithm
+like:
+
+    base = 0x80000000;         /* 0xffffffff80000000 if MIPS64 */
+    EntryLo0 = EntryLo1 = 0;   /* Invalid, not global. */
+    PageMask = 0;	       /* 4kB physical page size. */
+    slot = Num_TLB_Entries - 1;
+    for (i = 0; i < Num_TLB_Entries; i++) {
+	Index = i;
+	EntryHi = base + (slot * 2 * phys_page_size);
+	tlbwi;
+	slot--;
+    }
+
+That is a valid algorithm which, alone, would not suffer TLB Shutdown.
+
+However, if the firmware invalidates the TLB and then operating system
+invalidates the TLB, the combination of their -- otherwise safe -- TLB
+invalidation routines will suffer TLB Shutdown on CPUs which detect
+the condition at the time TLB entries are written.  (For instance, if
+Num_TLB_Entries is 64, the firmware will have written entry 63 to map
+virtual address (0x80000000 + (63 * 2 * 4096)), and the operating
+system will attempt to write entry 0 to write that exact same
+address.)
+
+The same type of problem can occur if, for instance, the firmware and
+the operating system have different notions of the page size to be
+used for invalid entries.
+
+As noted, this problem has been observed in practice, with deployed
+firmware and operating system code.
+
+
+* Safely Flushing the TLB after Control Transfers
+
+To address the issue of "incompatible" TLB invalidation routines,
+operating system and firmware code should flush the TLB immediately
+after taking control from another module of code which might have
+modified the TLB, to remove any potentially hazardous entries.
+
+The key to doing this is to be sure that entries already existing in
+the TLB are not duplicated by new entries.  This is done by probing
+the TLB, and assigning TLB entries virtual address which are known not
+to be in use.
+
+The exact set of steps which should be performed when cleaning the TLB
+is:
+
+1) Shrink all TLB entries to a small physical page size, preferably
+   4kB.
+
+   This allows the virtual address region used in step 2, below, to be
+   of manageable size.
+
+2) Using a temporary virtual address range (which does not overlap the
+   region to be used for normal TLB invalidation purposes), iterate
+   over 2 * Num_TLB_Entries virtual pages (each of which is 2 * the
+   physical page size, or 8kB if you used a 4kB physical page size in
+   step 1), probing for the page address in the TLB and skipping to
+   the next page in the temporary range if the address is found in the
+   TLB.
+
+   This will cause every TLB Entry to map a range in the temporary
+   virtual address range.  Often, 0x00000000 is a good base address
+   for this temporary address range, though any virtual address range
+   of at least (2 * Num_TLB_Entries * virtual_page_size) bytes which
+   doesn't overlap the normal TLB range of addresses used for TLB
+   invalidation will work.
+
+   This algorithm is made safe by use of the probes.  Note that even
+   with skipped pages because of mappings found by the probe
+   operations, no more than (2 * Num_TLB_Entries * virtual_page_size)
+   bytes of virtual address space will be needed to safely flush the
+   TLB.
+
+3) Invoke the normal system TLB invalidation routine.
+
+Expressed as pseudo-code, that algorithm is:
+
+    inval_base = 0x80000000;
+    flush_temp_range_base = 0;
+
+    /* Shrink every TLB entry; step 1 above. */
+    for (i = 0; i < Num_TLB_Entries; i++) {
+	Index = i;
+	tlbr;
+	PageMask = 0;	/* Set to 4kB physical page size. */
+	tlbwi;
+    }
+
+    /* Reassign TLB entries to map pages in the temporary range;
+       step 2 above. */
+    EntryLo0 = EntryLo1 = 0;		/* Invalid, not global. */
+    PageMask = 0;			/* 4kB physical page size. */
+    i = 0;
+    for (slot = 0; slot < (Num_TLB_Entries * 2); slot++) {
+
+	/* Probe to see if virtual page is already in mapped.  */
+	EntryHi = flush_temp_range_base + (slot * 2 * 4096);
+	tlbp;
+
+	/* Index.P is zero if the probe indicates that a TLB
+	   entry matches that virtual address.  */	      
+        if (Index[31] == 0)
+	    continue;		/* Mapped; skip to next virtual address.  */
+
+	/* Write the next TLB entry to map this virtual address.  */
+	Index = i;
+	tlbwi;
+	      
+	/* Next time around, do the next TLB entry.  If all have
+	   been done, stop processing.  */      
+	i++;
+	if (i == Num_TLB_Entries)
+	    break;
+
+    }
+
+    /* Invalidate the TLB using the normal algorithm and address
+       range; step 3 above.  Could be done with a call to the normal
+       TLB invalidation function.  */
+    EntryLo0 = EntryLo1 = 0;		/* Invalid, not global. */
+    PageMask = 0;			/* 4kB physical page size. */
+    for (i = 0; i < Num_TLB_Entries; i++) {
+	Index = i;
+	EntryHi = inval_base + (i * 2 * 4096);
+	tlbwi;
+    }
+
+If a routine like this is used to flush the TLB after control is
+received by the operating system or firmware, subsequent TLB
+invalidations will be safe from entries left in the TLB by the
+software previously in control of the CPU.
+
+
+* Conclusion
+
+The TLB Shutdown condition introduced in the MIPS32 and MIPS64
+Privileged Resource Architecture specifications requires care from
+firmware and operating system developers in order to insure that TLB
+manipulations are safe from TLB Shutdown.  This is especially true for
+software developers attempting to write code portable to multiple
+MIPS32 or MIPS64 CPUs, and for developers who independently maintain
+firmware and operating system kernels which must interoperate.
+
+TLB Shutdown avoidance has several subtleties which may not be obvious
+immediately.  This document has explored those subtleties and has
+presented tested algorithms which allow operating system and firmware
+developers to create portable, interoperable systems which avoid
+inadvertent TLB Shutdown conditions.
+
+
+* References
+
+[1] MIPS32 Architecture for Programmers Volume II: The MIPS32
+ Instruction Set.  Available from http://www.mips.com/publications/.
+
+[2] MIPS64 Architecture for Programmers Volume II: The MIPS64
+ Instruction Set.  Available from http://www.mips.com/publications/.
+
+[3] MIPS32 Architecture for Programmers Volume III: The MIPS32
+ Privileged Resource Architecture.  Available from
+ http://www.mips.com/publications/.
+
+[4] MIPS64 Architecture for Programmers Volume III: The MIPS64
+ Privileged Resource Architecture.  Available from
+ http://www.mips.com/publications/.
+
+[5] Sweetman, Dominic: See MIPS Run.  For the TLB initialization
+ example, see page 137.
+
+
+----
+$Id: tlb_inval.txt,v 1.3 2003/04/18 21:33:08 cgd Exp $
+Local variables:
+mode: text
+mode: auto-fill
+fill-column: 70
+tab-witch: 8
+End:

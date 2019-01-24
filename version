@@ -1,0 +1,135 @@
+version 1.3
+
+1.3	General release build, 2005-02-04.
+
+	Moved SiByte header files into the 'include/sibyte' directory.
+
+	Made various minor improvmenets to the BCM1250/BCM1125 header
+	files.  Actually included the BCM1x55/BCM1x80 header files in
+	this release.  (They were accidentally omitted in the previous
+	release.)
+	
+	Removed non-functional example programs, including the
+	'cfe_based_standalone' directory and the 'sb1250' directory.
+	New or revised examples will almost certainly appear in some
+	future release of this software collection.
+
+	Added experimental support to libexception to allow operation
+	on MIPS32 CPUs.  (The library has some known inefficiencies when
+	running on MIPS32 CPUs, but at this time the support is intended
+	to be used for experimentation only.)
+
+	Adapt libsbprof's sbprof_cpu_speed() function to work on the
+	BCM1x80/BCM1x55 families of parts.  (Use of the library on those
+	parts has not been tested extensively at this time.)
+
+1.2	General release build, 2004-12-07.
+
+	Added an IPv4 checksum routine (csum_partial.S) to the
+	collection of routines optimized for SB-1, in sb1-opt.
+
+	Fixed LP64 issues in libexception and libsbprof.
+
+	Added memcpy/memset example program to the libsbprof examples.
+
+	Adapted Paired-Single demonstration headers (psingle)
+	to work with versions of GCC which include MIPS Paired-Single
+	support (e.g., the Specifix 2004e_341 toolchain).
+
+	Added support for BCM1480, BCM1455, BCM1280, and BCM1255 to
+	the SiByte include files.
+
+	Added a CP0 PRID register decoding example that demonstrates
+	the processor revision number conversion discussed in the
+	SB1-AN100-R Application Note.
+
+1.1	General release build, 2004-05-20.
+
+	Added libmips_fpu, a header and library to allow easy
+	manipulation of the MIPS FPU control registers.
+
+	Reworked libexception and libsbprof configure scripts slightly.
+
+	Added new libexception example to show a very simple facility
+	to do stack pseudo-traces.
+
+	Reimplement Paired-Single FPU demonstration headers to use pure
+	inline functions and to avoid "volatile" asm qualifiers, to
+	allow better optimization.
+
+	Minor cleanups and additions to the BCM1250 header files.
+
+	Added some additional sample code, demonstrating building
+	standalone programs from CFE sources, and some additional
+	ethernet sample programs.
+
+	Added a demonstration of MIPS unaligned access exception handling.
+
+1.0.27	Version bump for development after release.
+
+1.0.26	General release build, 2004-02-23.
+
+1.0.25	Add cache error handling example code.  Some header file
+	cleanups and minor additions.
+
+1.0.24	Version bump for development after release.
+
+1.0.23	General release build, 2003-10-21.
+
+1.0.22	Makefile changes and change branches to subroutine calls
+	in *.S files.
+
+1.0.21  Cleaned up some problems with out of date files in smbus
+        code.
+
+1.0.20	Added some additional CP0 defines to sbmips.h.
+
+1.0.19	Version bump for development after release.
+
+1.0.18	General release build, 2003-10-03.
+
+1.0.17	Fixed asm constraints in libsbprof, and while there
+	improved asm efficiency.  Updated sb1250/bringup/sbstart
+	to use new sources.  Added some JTAG-related definitions.
+
+1.0.16	Tweaked the name of the source tarball that's built.
+
+1.0.15	Version bump for development after release.
+
+1.0.14	General release build, 2003-09-05.
+
+1.0.13	Added the "sb1-opt" directory, which contains standard C library
+	functions optimized for SB-1.
+
+1.0.12	Made some libsbprof routines public so apps can get access
+	to the buffer, added flags to init routine for quieting 
+ 	noisy messages on exit, fixed some minor bugs.
+
+1.0.11	Added tests to some headers, to be compatible with new compilers.
+
+1.0.10	Removed unneeded files in sb1250/nbringup/common/fsim
+
+1.0.9	Version bump for development after release.
+
+1.0.8	General release build, 2003-07-09.
+
+1.0.7	Fixed headers' conditional feature inclusion macros to do the
+	right thing for 1250 C stepping features.
+
+1.0.6	Add defines in sb1250_scd.h for additional watchdog timer
+	register fields (most of which have been present forever, but
+	one of which is new in BCM1250 "C" steppings).
+
+1.0.5	Fix memory test compiler (in sb1250/bringup/mc) to build on
+	RedHat 9 systems.
+
+1.0.4	Bug fix in sb1250_scd.h.
+
+1.0.3	Version bump for development after release.
+
+1.0.2	General release build, 2003-06-06.
+
+1.0.1	Added 'util' subdirectory in libsbprof to hold
+	source code for tbanal (relocated from perfsamplesw).
+
+1.0.0	Started tracking samplesw versions.
